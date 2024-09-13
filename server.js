@@ -1,76 +1,88 @@
 const express = require('express');
-const bodyParser = require('body-parser');
-const { TonClient, abiContract, signerNone } = require('ton-client-node-js');
+const { TonClient, WalletContractV3R2, fromNano, toNano } = require('ton');
+const { mnemonicNew, mnemonicToWalletKey } = require('ton-crypto');
 
 const app = express();
-app.use(bodyParser.json());
+const port = process.env.PORT || 3000;
 
-const tonClient = new TonClient({
-    network: {
-        server_address: 'https://net.ton.dev', // Use testnet for testing, switch to mainnet for production
-    },
+// Initialize the TON client for the testnet
+const client = new TonClient({
+    endpoint: 'https://testnet.toncenter.com/api/v2/jsonRPC',
 });
 
-app.post('/connect-wallet', async (req, res) => {
-    // Example endpoint for wallet connection
-    const { publicKey } = req.body;
-
+// Function to fetch wallet information (as an example)
+async function getWalletInfo(walletAddress) {
     try {
-        // Logic to handle wallet connection
-        res.status(200).json({ message: 'Wallet connected successfully', publicKey });
+        const result = await client.getAddressInformation(walletAddress);
+        console.log(result);
+    } catch (error) {
+        console.error('Error fetching wallet info:', error);
+    }
+}
+
+// // Test the wallet information for a specific address
+// const walletAddress = '0QC-wrPp5k0bek8pYKuKhUBTQYzz0RoDxYSFKC0CRBjtgA7W'; // Replace with your wallet address
+// getWalletInfo(walletAddress);
+
+// Endpoint to create a new wallet
+app.get('/createWallet', async (req, res) => {
+    try {
+        const mnemonic = await mnemonicNew(); // Generate a new mnemonic
+        const keyPair = await mnemonicToWalletKey(mnemonic); // Derive key pair from mnemonic
+
+        // Convert public key to appropriate format (Buffer or Uint8Array)
+        const publicKeyBuffer = Buffer.from(keyPair.publicKey); // Or Uint8Array
+
+        const wallet = WalletContractV3R2.create({ publicKey: publicKeyBuffer }); // Create a wallet contract instance
+        const walletAddress = wallet.address.toString(); // Get the wallet address
+
+        res.json({ mnemonic: mnemonic.join(' '), walletAddress });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-app.post('/send-transaction', async (req, res) => {
-    const { destination, amount, privateKey } = req.body;
+// Endpoint to get wallet balance
+app.get('/getBalance/:walletAddress', async (req, res) => {
+    const { walletAddress } = req.params;
 
     try {
-        const transferAbi = {
-            "ABI version": 2,
-            "functions": [
-                {
-                    "name": "transfer",
-                    "inputs": [
-                        {"name":"dest","type":"address"},
-                        {"name":"amount","type":"uint64"}
-                    ],
-                    "outputs": []
-                }
-            ],
-        };
+        const balance = await client.getBalance(walletAddress);
+        res.json({ balance: fromNano(balance) });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 
-        const transferParams = {
-            abi: abiContract(transferAbi),
-            call_set: {
-                function_name: "transfer",
-                input: {
-                    dest: destination,
-                    amount: amount,
-                }
-            },
-            signer: {
-                type: 'Keys',
-                keys: {
-                    public: publicKey,
-                    secret: privateKey,
-                },
-            },
-        };
+// Endpoint to send a transaction
+app.post('/sendTransaction', express.json(), async (req, res) => {
+    const { mnemonic, toAddress, amount } = req.body;
 
-        const result = await tonClient.processing.process_message({
-            send_events: false,
-            message_encode_params: transferParams,
+    try {
+        // Validate amount
+        if (isNaN(amount) || amount <= 0) {
+            throw new Error('Invalid amount. Please provide a valid positive number.');
+        }
+
+        const keyPair = await mnemonicToWalletKey(mnemonic.split(' '));
+        const wallet = WalletContractV3R2.create({ publicKey: keyPair.publicKey });
+        const seqno = await wallet.getSeqno();
+
+        await wallet.sendTransfer({
+            secretKey: keyPair.secretKey,
+            toAddress,
+            amount: toNano(amount),
+            seqno,
+            payload: 'Test transfer',
         });
 
-        res.status(200).json({ message: 'Transaction sent successfully', result });
+        res.json({ message: `Sent ${amount} TON to ${toAddress}` });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-
-app.listen(3000, () => {
-    console.log('Server running on port 3000');
+// Start the server
+app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
 });
